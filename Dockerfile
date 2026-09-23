@@ -7,14 +7,6 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y default-jre && rm -rf /var/lib/apt/lists/*
 
-# Enable and install SSH for Azure
-# ssh root@127.0.0.1 -p 2222 -c aes256-cbc
-ENV SSH_PASSWD "root:Docker!"
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends openssh-server \
-    && echo "$SSH_PASSWD" | chpasswd 
-
-COPY sshd_config /etc/ssh/
 
 ENV JAVA_HOME="/usr/lib/jvm/java-11-openjdk-amd64"
 
