@@ -63,3 +63,20 @@ The `demo/` directory contains a static HTML page that interacts with the API an
 To view the demo, open `demo/index.html` in a browser (or serve the folder via a simple static server). Ensure the API is running and accessible from the configured base URL.
 
 ![Demo UI](demo/screencapture.png)
+
+## Protégé connection resilience
+
+Server mode uses a generation-aware connection manager that can recover from a lost
+RMI server/session without restarting the API process. Operational endpoints are:
+
+- `/health/live` — Flask process liveness;
+- `/health/ready` — real Protégé server/session/project readiness (200 or 503); and
+- `/health` — compatibility summary using the same real readiness probe.
+
+Reads may reconnect and retry once after a classified transport/session failure.
+Writes are never blindly replayed and report `UNKNOWN_OUTCOME` when their result could
+be uncertain. `PROTEGE_POLL_EVENTS` remains enabled by default.
+
+See [the FR #29 investigation and design](docs/fr29-rmi-resilience.md) for the state
+model, configuration, bytecode/runtime evidence, RMI timeout semantics, publication
+limitations, and acceptance status.

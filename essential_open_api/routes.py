@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import wraps
 import json
 import re
 from typing import List, Optional
@@ -10,7 +11,12 @@ from pathlib import Path
 from flask import Blueprint, jsonify, request
 
 from .jvm import (
+    RepositoryUnavailable,
+    UnknownWriteOutcome,
     call_publish_async,
+    execute_repository_read,
+    execute_repository_write,
+    get_connection_manager,
     get_knowledge_base,
     get_project,
     get_publish_status,
@@ -21,6 +27,74 @@ api_bp = Blueprint("api", __name__)
 SAFE_FRAME_NAME_RE = re.compile(r"[^0-9A-Za-z_]")
 RESERVED_FIELDS = {"className", "name", "description", "externalId", "id"}
 NAME_SLOT_CANDIDATES = ("name_", "name", "relation_name", ":relation_name")
+
+
+def _repository_unavailable_response(exc: RepositoryUnavailable):
+    response = jsonify(
+        {
+            "error": "Repository temporarily unavailable.",
+            "status": "NOT_READY",
+            "errorCategory": exc.category.value,
+        }
+    )
+    if exc.retry_after_seconds > 0:
+        response.headers["Retry-After"] = str(
+            max(1, int(exc.retry_after_seconds + 0.999))
+        )
+    return response, 503
+
+
+def _unknown_outcome_response(exc: UnknownWriteOutcome):
+    return (
+        jsonify(
+            {
+                "error": "Repository operation outcome requires reconciliation.",
+                "outcome": exc.outcome,
+                "errorCategory": exc.category.value,
+                "connectionGeneration": exc.generation,
+                "retrySafe": False,
+            }
+        ),
+        503,
+    )
+
+
+def repository_read_route(view):
+    """Retry an entire GET once only after a proven connection failure."""
+
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        def operation(lease):
+            result = view(*args, **kwargs)
+            get_connection_manager().validate(lease)
+            return result
+
+        try:
+            return execute_repository_read(operation)
+        except RepositoryUnavailable as exc:
+            return _repository_unavailable_response(exc)
+
+    return wrapped
+
+
+def repository_write_route(view):
+    """Execute a mutation once and fail closed when its outcome is uncertain."""
+
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        def operation(lease):
+            result = view(*args, **kwargs)
+            get_connection_manager().validate(lease)
+            return result
+
+        try:
+            return execute_repository_write(operation)
+        except RepositoryUnavailable as exc:
+            return _repository_unavailable_response(exc)
+        except UnknownWriteOutcome as exc:
+            return _unknown_outcome_response(exc)
+
+    return wrapped
 
 
 class InstanceCreationError(Exception):
@@ -49,6 +123,7 @@ class CreatedInstance:
 
 
 @api_bp.get("/list_items")
+@repository_read_route
 def list_instances():
     """List all instances of a given class from the Protégé knowledge base.
     ---
@@ -146,7 +221,7 @@ def publish():
     """
     project = get_project()
     if project is None:
-        return jsonify({"error": "Project not loaded!"}), 500
+        return jsonify({"error": "Repository temporarily unavailable.", "status": "NOT_READY"}), 503
 
     data = request.get_json(silent=True)
     if data:
@@ -162,7 +237,12 @@ def publish():
     user = user or "alice"
     pwd = pwd or "s3cr3t"
 
-    job_id = call_publish_async(project, url, user, pwd)
+    try:
+        job_id = call_publish_async(project, url, user, pwd)
+    except RepositoryUnavailable as exc:
+        return _repository_unavailable_response(exc)
+    except UnknownWriteOutcome as exc:
+        return _unknown_outcome_response(exc)
     if job_id is None:
         return jsonify({"error": "Failed to start publish job."}), 500
 
@@ -216,6 +296,7 @@ def publish_status():
 
 
 @api_bp.get("/classes/")
+@repository_read_route
 def list_root_classes():
     """Return the recursive tree of classes starting from the root.
     ---
@@ -334,6 +415,7 @@ def list_root_classes():
 
 
 @api_bp.get("/classes/<string:class_name>/")
+@repository_read_route
 def list_child_classes(class_name: str):
     """Return direct subclasses for a given class.
     ---
@@ -463,6 +545,7 @@ def get_class_form(class_name: str):
     return jsonify(data)
 
 @api_bp.get("/classes/<string:class_name>/slots")
+@repository_read_route
 def list_class_slots(class_name: str):
     """Return template slots for the given class.
     ---
@@ -1275,6 +1358,7 @@ def update_instance_from_payload(kb, instance, payload: dict, created_frames: Li
 
 
 @api_bp.post("/instances")
+@repository_write_route
 def create_instance():
     """Create a new instance in the Protégé knowledge base.
     ---
@@ -1369,6 +1453,7 @@ def create_instance():
 
 
 @api_bp.post("/instances/batch")
+@repository_write_route
 def create_instances_batch():
     """Create multiple instances (optionally with nested objects).
     ---
@@ -1471,6 +1556,7 @@ def create_instances_batch():
 
 
 @api_bp.route("/instances/<string:instance_id>", methods=["POST", "PATCH"])
+@repository_write_route
 def update_instance(instance_id: str):
     """Update an existing instance.
     ---
@@ -1576,6 +1662,7 @@ def update_instance(instance_id: str):
 
 
 @api_bp.delete("/instances/<string:instance_id>")
+@repository_write_route
 def delete_instance_route(instance_id: str):
     """Delete an instance from the Protégé knowledge base.
     ---
@@ -1630,6 +1717,7 @@ def delete_instance_route(instance_id: str):
 
 
 @api_bp.get("/instances/<string:instance_id>")
+@repository_read_route
 def get_instance(instance_id: str):
     """Return details for a specific instance.
     ---
@@ -1700,6 +1788,7 @@ def get_instance(instance_id: str):
 
 
 @api_bp.get("/classes/<string:class_name>/instances")
+@repository_read_route
 def list_instances_by_class(class_name):
     """List instances of a class with pagination and depth configuration.
     ---
