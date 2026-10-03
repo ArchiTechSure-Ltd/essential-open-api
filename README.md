@@ -1,6 +1,19 @@
 # essential-open-api
 Essential Open API is a Python Flask API that provides dynamic access to classes, instances, and relationships from the Essential meta-model, compatible with Essential Utility API v3. It also enables repository publishing and real-time progress monitoring within Essential Open Source.
 
+## ArchiTechSure repository boundary
+
+This repository is the source/implementation home for the **Essential Open API component**. It is not the cross-platform requirement backlog and it does not own architecture-repository content.
+
+- **essential-open-platform (EOP)** owns reusable platform requirements and operational contracts. EOP requirements affecting API behaviour may be implemented here while the requirement remains tracked in EOP.
+- **ea-developer-kit (EDK)** owns reusable EA solution-development assets such as custom-view tooling, generators, exporters and developer validation.
+- **ea-modeller-kit (EMK)** owns modelling method, profiles, patterns, reconciliation and modelling-governance semantics.
+- **ea-repo-work (ERW)** owns planned work that changes target EA repository state and verifies the resulting architecture knowledge.
+- **Target EA repositories** own the accepted architecture facts for their organisation.
+
+Component-local maintenance may be tracked here, but reusable platform capability belongs in EOP. Model/data population and architecture-content work belongs in ERW.
+
+
 ## Run with Docker
 
 This project ships with a ready-to-use Docker setup. Follow the steps below to build and run the containerized API.
