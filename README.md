@@ -3,16 +3,11 @@ Essential Open API is a Python Flask API that provides dynamic access to classes
 
 ## ArchiTechSure repository boundary
 
-This repository is the source/implementation home for the **Essential Open API component**. It is not the cross-platform requirement backlog and it does not own architecture-repository content.
+This repository is the source/implementation home for ArchiTechSure's **Essential Open API component**. It is not the cross-platform requirement backlog and it does not own organisation/client architecture-repository content.
 
-- **essential-open-platform (EOP)** owns reusable platform requirements and operational contracts. EOP requirements affecting API behaviour may be implemented here while the requirement remains tracked in EOP.
-- **ea-developer-kit (EDK)** owns reusable EA solution-development assets such as custom-view tooling, generators, exporters and developer validation.
-- **ea-modeller-kit (EMK)** owns modelling method, profiles, patterns, reconciliation and modelling-governance semantics.
-- **ea-repo-work (ERW)** owns planned work that changes target EA repository state and verifies the resulting architecture knowledge.
-- **Target EA repositories** own the accepted architecture facts for their organisation.
+Reusable platform requirements are governed separately and may be implemented partly in this component. Repository modelling/population work and target-repository change evidence belong outside this source repository.
 
-Component-local maintenance may be tracked here, but reusable platform capability belongs in EOP. Model/data population and architecture-content work belongs in ERW.
-
+Component-local maintenance may be tracked here; cross-platform product capability should remain linked to its governing platform requirement.
 
 ## Run with Docker
 
