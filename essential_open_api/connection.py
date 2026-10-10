@@ -223,12 +223,16 @@ class ConnectionManager:
         self._last_failure_at: Optional[datetime] = None
         self._last_error_category: Optional[ErrorCategory] = None
         self._consecutive_failures = 0
+        self._current_backoff_seconds = 0.0
         self._next_retry_monotonic = 0.0
         self._connecting = False
 
         self._wake_event = threading.Event()
         self._stop_event = threading.Event()
         self._worker_thread: Optional[threading.Thread] = None
+        self._worker_cycle_started_at: Optional[datetime] = None
+        self._worker_last_progress_at: Optional[datetime] = None
+        self._worker_last_outcome: Optional[str] = None
 
     @staticmethod
     def _default_disposer(project: object) -> None:
@@ -263,28 +267,66 @@ class ConnectionManager:
 
     def _worker(self) -> None:
         while not self._stop_event.is_set():
+            with self._condition:
+                self._worker_cycle_started_at = utc_now()
+            outcome = "READY"
             try:
-                self.ensure_connection(wait_timeout=0.0)
+                # Do not wait for user traffic to discover a dead session.  A
+                # normal acquire probes the current generation whenever its
+                # successful probe is older than the configured interval.
+                self.acquire(wait_timeout=0.0)
             except RepositoryUnavailable:
+                outcome = "UNAVAILABLE"
                 with self._condition:
                     delay = max(
                         0.05, self._next_retry_monotonic - time.monotonic()
                     )
-                self._wake_event.wait(delay)
-                self._wake_event.clear()
+            except Exception:  # keep the recovery worker alive on internal faults
+                outcome = "INTERNAL_ERROR"
+                with self._condition:
+                    if self._connecting:
+                        self._record_failure_locked(ErrorCategory.UNKNOWN)
+                    delay = max(
+                        0.05,
+                        self._initial_backoff,
+                        self._next_retry_monotonic - time.monotonic(),
+                    )
+                LOGGER.error(
+                    "Protégé connection monitor recovered from an internal error."
+                )
             else:
-                self._wake_event.wait()
-                self._wake_event.clear()
+                with self._condition:
+                    if self._probe_interval <= 0:
+                        delay = None
+                    elif self._last_successful_probe is None:
+                        delay = 0.05
+                    else:
+                        age = (
+                            utc_now() - self._last_successful_probe
+                        ).total_seconds()
+                        delay = max(0.05, self._probe_interval - age)
+
+            with self._condition:
+                self._worker_cycle_started_at = None
+                self._worker_last_progress_at = utc_now()
+                self._worker_last_outcome = outcome
+
+            self._wake_event.wait(delay)
+            self._wake_event.clear()
 
     def _retry_after_locked(self) -> float:
         return max(0.0, self._next_retry_monotonic - time.monotonic())
 
     def _record_failure_locked(self, category: ErrorCategory) -> None:
         self._consecutive_failures += 1
-        delay = min(
-            self._maximum_backoff,
-            self._initial_backoff * (2 ** (self._consecutive_failures - 1)),
-        )
+        if self._current_backoff_seconds <= 0:
+            delay = self._initial_backoff
+        else:
+            delay = min(
+                self._maximum_backoff,
+                self._current_backoff_seconds * 2,
+            )
+        self._current_backoff_seconds = delay
         self._next_retry_monotonic = time.monotonic() + delay
         self._state = ConnectionState.DEGRADED
         self._last_failure_at = utc_now()
@@ -388,6 +430,7 @@ class ConnectionManager:
             self._last_successful_probe = self._connected_since
             self._last_error_category = None
             self._consecutive_failures = 0
+            self._current_backoff_seconds = 0.0
             self._next_retry_monotonic = 0.0
             self._connecting = False
             lease = ConnectionLease(project, knowledge_base, self._generation)
@@ -395,10 +438,18 @@ class ConnectionManager:
 
         if old_project is not None and old_project is not project:
             self._dispose_in_background(old_project)
-        LOGGER.info(
-            "Protégé repository connection ready (generation=%d).",
-            lease.generation,
-        )
+        if self._reconnect_count:
+            LOGGER.warning(
+                "Protégé repository connection recovered "
+                "(generation=%d, reconnect_count=%d).",
+                lease.generation,
+                self._reconnect_count,
+            )
+        else:
+            LOGGER.info(
+                "Protégé repository connection ready (generation=%d).",
+                lease.generation,
+            )
         return lease
 
     def current_lease(self) -> Optional[ConnectionLease]:
@@ -423,6 +474,7 @@ class ConnectionManager:
     ) -> ConnectionLease:
         """Get a connection and probe it when forced or when the probe is stale."""
 
+        deadline = time.monotonic() + max(0.0, wait_timeout)
         lease = self.ensure_connection(wait_timeout=wait_timeout)
         with self._condition:
             probe_due = (
@@ -436,8 +488,13 @@ class ConnectionManager:
         if not probe_due:
             return lease
 
-        with self._probe_lock:
-            lease = self.ensure_connection(wait_timeout=wait_timeout)
+        remaining = max(0.0, deadline - time.monotonic())
+        if not self._probe_lock.acquire(timeout=remaining):
+            raise RepositoryUnavailable(ErrorCategory.PROBE)
+        try:
+            lease = self.ensure_connection(
+                wait_timeout=max(0.0, deadline - time.monotonic())
+            )
             with self._condition:
                 probe_due = (
                     force_probe
@@ -461,6 +518,8 @@ class ConnectionManager:
                 if lease.generation == self._generation:
                     self._last_successful_probe = utc_now()
             return lease
+        finally:
+            self._probe_lock.release()
 
     def invalidate(
         self,
@@ -475,6 +534,7 @@ class ConnectionManager:
                 return False
             old_project = self._project
             had_connection = old_project is not None or self._knowledge_base is not None
+            invalidated_generation = self._generation
             self._project = None
             self._knowledge_base = None
             self._state = ConnectionState.INVALID
@@ -482,9 +542,19 @@ class ConnectionManager:
             self._last_failure_at = utc_now()
             self._last_error_category = category
             self._next_retry_monotonic = 0.0
+            if had_connection:
+                self._consecutive_failures = 0
+                self._current_backoff_seconds = 0.0
             self._condition.notify_all()
         self._dispose_in_background(old_project)
         self._wake_event.set()
+        if had_connection:
+            LOGGER.warning(
+                "Protégé repository connection invalidated "
+                "(generation=%d, category=%s).",
+                invalidated_generation,
+                category.value,
+            )
         return had_connection
 
     def execute_read(
@@ -585,4 +655,14 @@ class ConnectionManager:
                     else None
                 ),
                 "retry_after_seconds": round(self._retry_after_locked(), 3),
+                "background_monitor_alive": bool(
+                    self._worker_thread and self._worker_thread.is_alive()
+                ),
+                "background_monitor_cycle_started_at": _iso_or_none(
+                    self._worker_cycle_started_at
+                ),
+                "background_monitor_last_progress_at": _iso_or_none(
+                    self._worker_last_progress_at
+                ),
+                "background_monitor_last_outcome": self._worker_last_outcome,
             }

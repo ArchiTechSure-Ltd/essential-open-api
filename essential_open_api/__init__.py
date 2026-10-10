@@ -71,6 +71,10 @@ def create_app(
 
         ready = manager.readiness(wait_timeout=CONNECTION_WAIT_SECONDS)
         payload = manager.status()
+        # A bounded wait for another in-flight probe can fail while the
+        # generation itself is still READY.  Report this request's real
+        # readiness result rather than the cached lifecycle state.
+        payload["status"] = "READY" if ready else "NOT_READY"
         return jsonify(payload), 200 if ready else 503
 
     @app.get("/health")
@@ -79,6 +83,7 @@ def create_app(
 
         ready = manager.readiness(wait_timeout=CONNECTION_WAIT_SECONDS)
         payload = manager.status()
+        payload["status"] = "READY" if ready else "NOT_READY"
         payload["kb_loaded"] = ready
         return jsonify(payload), 200
 
