@@ -109,6 +109,13 @@ swap. Invalidation is generation-aware, so a late failure from generation N cann
 invalidate replacement generation N+1. Disposal is best-effort on a daemon thread so
 a dead RMI close cannot block recovery.
 
+The background manager also probes a READY generation at the configured probe interval.
+It does not wait for a health check or repository request to discover a session invalidated
+while the API is idle. A failed probe invalidates that exact generation, wakes the
+single-flight connector, and recreates the complete `RemoteClientProject` (including its
+event-polling state). A probe already in progress can only hold another caller for that
+caller's bounded connection-wait budget.
+
 Initial backoff defaults to 1 second, maximum backoff to 30 seconds, probe interval to
 5 seconds, and request wait to 2 seconds. They are configurable with:
 
@@ -116,6 +123,10 @@ Initial backoff defaults to 1 second, maximum backoff to 30 seconds, probe inter
 - `PROTEGE_RECONNECT_MAX_BACKOFF_SECONDS`;
 - `PROTEGE_PROBE_INTERVAL_SECONDS`; and
 - `PROTEGE_CONNECTION_WAIT_SECONDS`.
+
+A positive probe interval enables unattended background monitoring. Setting it to zero
+disables the timed background probe while retaining probe-on-acquire behaviour; this is
+intended for deterministic tests, not normal server operation.
 
 ## Real readiness and health
 
@@ -129,8 +140,9 @@ session is recognised and the configured project remains available. A non-null l
 proxy alone is never sufficient. Not-ready responses use HTTP 503.
 
 Health metadata contains state, mode, repository/project, generation, reconnect count,
-connected/probe/failure timestamps, sanitised error category, and retry delay. It does
-not include server credentials, session objects, exception text, or stack traces.
+connected/probe/failure timestamps, sanitised error category, retry delay, and whether
+the background monitor thread is alive. It does not include server credentials, session
+objects, exception text, or stack traces.
 The legacy `/health` remains HTTP 200 for compatibility but now reports honest
 `READY`/`NOT_READY` and sets `kb_loaded` from the real probe.
 

@@ -118,6 +118,85 @@ def test_background_start_recovers_when_server_becomes_available():
         manager.stop()
 
 
+def test_background_monitor_repairs_idle_stale_session_before_next_read():
+    harness = Harness()
+    manager = manager_for(harness, probe_interval_seconds=0.01)
+    manager.start()
+    try:
+        assert wait_until(lambda: manager.status()["status"] == "READY")
+        first = manager.current_lease()
+        assert first is not None
+
+        # This models a server restart invalidating the exported RMI objects
+        # while the API receives no user requests.
+        first.project.dead = True
+
+        assert wait_until(
+            lambda: manager.status()["connection_generation"] == 2,
+            timeout=1.5,
+        )
+        assert manager.status()["status"] == "READY"
+        assert manager.status()["reconnect_count"] == 1
+        assert first.project.disposed.wait(0.5)
+        assert manager.current_lease().project is not first.project
+
+        calls: list[int] = []
+
+        def read(lease):
+            calls.append(lease.generation)
+            return lease.knowledge_base["project"]
+
+        assert manager.execute_read(read) == 2
+        assert calls == [2]
+    finally:
+        manager.stop()
+
+
+def test_background_monitor_recovers_after_temporary_network_loss():
+    harness = Harness()
+    manager = manager_for(harness, probe_interval_seconds=0.01)
+    manager.start()
+    try:
+        assert wait_until(lambda: manager.status()["status"] == "READY")
+        first = manager.current_lease()
+        assert first is not None
+
+        harness.available = False
+        first.project.dead = True
+        assert wait_until(lambda: manager.status()["status"] == "NOT_READY")
+
+        harness.available = True
+        assert wait_until(
+            lambda: manager.status()["connection_generation"] == 2,
+            timeout=1.5,
+        )
+        assert manager.status()["status"] == "READY"
+    finally:
+        manager.stop()
+
+
+def test_background_monitor_survives_unexpected_internal_error():
+    harness = Harness()
+    manager = manager_for(harness, probe_interval_seconds=0.01)
+    acquire = manager.acquire
+    calls = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("unexpected internal monitor failure")
+        return acquire(*args, **kwargs)
+
+    manager.acquire = fail_once  # type: ignore[method-assign]
+    manager.start()
+    try:
+        assert wait_until(lambda: manager.status()["status"] == "READY")
+        assert manager.status()["background_monitor_alive"] is True
+    finally:
+        manager.stop()
+
+
 def test_stale_non_null_proxy_never_reports_ready():
     harness = Harness()
     manager = manager_for(harness)
@@ -188,6 +267,22 @@ def test_concurrent_callers_create_only_one_connection():
     assert harness.connect_calls == 1
 
 
+def test_concurrent_callers_create_only_one_replacement_generation():
+    harness = Harness()
+    manager = manager_for(harness, probe_interval_seconds=60.0)
+    first = manager.acquire()
+    manager.invalidate(ErrorCategory.SESSION, generation=first.generation)
+
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        generations = list(
+            pool.map(lambda _item: manager.acquire().generation, range(10))
+        )
+
+    assert generations == [2] * 10
+    assert harness.connect_calls == 2
+    assert manager.status()["reconnect_count"] == 1
+
+
 def test_outage_backoff_prevents_busy_loop_and_is_bounded():
     harness = Harness()
     harness.available = False
@@ -206,6 +301,61 @@ def test_outage_backoff_prevents_busy_loop_and_is_bounded():
         manager.ensure_connection()
     assert harness.connect_calls == 2
     assert third.value.retry_after_seconds <= 0.021
+
+
+def test_backoff_stays_bounded_after_many_failures():
+    harness = Harness()
+    manager = manager_for(harness)
+
+    with manager._condition:  # pylint: disable=protected-access
+        for _ in range(5000):
+            manager._record_failure_locked(  # pylint: disable=protected-access
+                ErrorCategory.CONNECTION
+            )
+
+    status = manager.status()
+    assert status["retry_after_seconds"] <= 0.02
+    assert status["state"] == "DEGRADED"
+
+
+def test_waiting_for_an_inflight_probe_is_bounded():
+    harness = Harness()
+    block_probe = threading.Event()
+    probe_entered = threading.Event()
+    block_enabled = False
+
+    def probe(project, knowledge_base):
+        harness.probe(project, knowledge_base)
+        if block_enabled:
+            probe_entered.set()
+            assert block_probe.wait(1.0)
+
+    manager = ConnectionManager(
+        harness.connect,
+        probe,
+        repository="disposable-test",
+        probe_interval_seconds=60.0,
+    )
+    manager.acquire()
+    block_enabled = True
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(
+            manager.acquire,
+            wait_timeout=1.0,
+            force_probe=True,
+        )
+        assert probe_entered.wait(0.5)
+
+        started = time.monotonic()
+        with pytest.raises(RepositoryUnavailable) as failure:
+            manager.acquire(wait_timeout=0.02, force_probe=True)
+        elapsed = time.monotonic() - started
+
+        assert failure.value.category is ErrorCategory.PROBE
+        assert elapsed < 0.25
+        block_probe.set()
+        pending.result(timeout=0.5)
 
 
 def test_read_connection_failure_reconnects_and_retries_once():

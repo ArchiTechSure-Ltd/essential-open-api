@@ -75,7 +75,10 @@ To view the demo, open `demo/index.html` in a browser (or serve the folder via a
 ## Protégé connection resilience
 
 Server mode uses a generation-aware connection manager that can recover from a lost
-RMI server/session without restarting the API process. Operational endpoints are:
+RMI server/session without restarting the API process. While connected, its background
+monitor performs a real remote probe at `PROTEGE_PROBE_INTERVAL_SECONDS`; stale
+sessions are therefore repaired even when there is no user traffic. Operational
+endpoints are:
 
 - `/health/live` — Flask process liveness;
 - `/health/ready` — real Protégé server/session/project readiness (200 or 503); and
@@ -85,6 +88,7 @@ Reads may reconnect and retry once after a classified transport/session failure.
 Writes are never blindly replayed and report `UNKNOWN_OUTCOME` when their result could
 be uncertain. `PROTEGE_POLL_EVENTS` remains enabled by default.
 
-See [the FR #29 investigation and design](docs/fr29-rmi-resilience.md) for the state
-model, configuration, bytecode/runtime evidence, RMI timeout semantics, publication
-limitations, and acceptance status.
+See [the FR #29 investigation and design](docs/fr29-rmi-resilience.md) and the
+[EOP-091 continuous-availability follow-up](docs/eop-091-continuous-availability.md)
+for the state model, configuration, runtime evidence, RMI timeout semantics,
+publication limitations, and acceptance status.
