@@ -64,8 +64,12 @@ The smallest application-level correction is in the existing connection manager:
   existing fresh connector;
 - bound waits for an in-flight probe by the caller's connection-wait budget;
 - calculate capped backoff iteratively so an arbitrarily long outage cannot overflow;
-- keep the monitor alive after an unexpected internal exception; and
-- expose `background_monitor_alive` with the existing non-sensitive readiness metadata.
+- keep the monitor alive after an unexpected internal exception and clear a stranded
+  `_connecting` flag before the next bounded attempt;
+- expose monitor liveness, current-cycle start, last-progress time, and last outcome in
+  the existing non-sensitive readiness metadata; and
+- make the HTTP readiness result authoritative even when the connection generation
+  remains `READY` but the request times out behind an in-flight probe.
 
 No read or write replay rules change. Writes still execute once and return
 `UNKNOWN_OUTCOME` after a classified transport/session failure.
@@ -75,7 +79,9 @@ No read or write replay rules change. Writes still execute once and return
 Deterministic tests cover idle invalidation, first read after automatic repair, temporary
 network loss, fresh generation, event-dependent object recreation, concurrent
 single-flight connection, bounded probe-lock waiting, prolonged capped backoff, honest
-readiness, safe read retry, and no write replay.
+readiness, monitor progress visibility, unexpected-worker recovery with an in-flight
+connection, safe read retry, and no write replay. The final pre-merge suite contains 33
+tests.
 
 The exact pushed commit `d5f2bd74b689499f23c7f12c7c1beb859d3f9b12` was also built on
 Tower and run as a labelled disposable container against Demo's read-only repository

@@ -230,6 +230,9 @@ class ConnectionManager:
         self._wake_event = threading.Event()
         self._stop_event = threading.Event()
         self._worker_thread: Optional[threading.Thread] = None
+        self._worker_cycle_started_at: Optional[datetime] = None
+        self._worker_last_progress_at: Optional[datetime] = None
+        self._worker_last_outcome: Optional[str] = None
 
     @staticmethod
     def _default_disposer(project: object) -> None:
@@ -264,17 +267,22 @@ class ConnectionManager:
 
     def _worker(self) -> None:
         while not self._stop_event.is_set():
+            with self._condition:
+                self._worker_cycle_started_at = utc_now()
+            outcome = "READY"
             try:
                 # Do not wait for user traffic to discover a dead session.  A
                 # normal acquire probes the current generation whenever its
                 # successful probe is older than the configured interval.
                 self.acquire(wait_timeout=0.0)
             except RepositoryUnavailable:
+                outcome = "UNAVAILABLE"
                 with self._condition:
                     delay = max(
                         0.05, self._next_retry_monotonic - time.monotonic()
                     )
             except Exception:  # keep the recovery worker alive on internal faults
+                outcome = "INTERNAL_ERROR"
                 with self._condition:
                     if self._connecting:
                         self._record_failure_locked(ErrorCategory.UNKNOWN)
@@ -297,6 +305,11 @@ class ConnectionManager:
                             utc_now() - self._last_successful_probe
                         ).total_seconds()
                         delay = max(0.05, self._probe_interval - age)
+
+            with self._condition:
+                self._worker_cycle_started_at = None
+                self._worker_last_progress_at = utc_now()
+                self._worker_last_outcome = outcome
 
             self._wake_event.wait(delay)
             self._wake_event.clear()
@@ -645,4 +658,11 @@ class ConnectionManager:
                 "background_monitor_alive": bool(
                     self._worker_thread and self._worker_thread.is_alive()
                 ),
+                "background_monitor_cycle_started_at": _iso_or_none(
+                    self._worker_cycle_started_at
+                ),
+                "background_monitor_last_progress_at": _iso_or_none(
+                    self._worker_last_progress_at
+                ),
+                "background_monitor_last_outcome": self._worker_last_outcome,
             }

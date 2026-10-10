@@ -197,6 +197,75 @@ def test_background_monitor_survives_unexpected_internal_error():
         manager.stop()
 
 
+def test_unexpected_worker_error_clears_inflight_connection_state():
+    harness = Harness()
+    manager = manager_for(harness, probe_interval_seconds=0.01)
+    acquire = manager.acquire
+    calls = 0
+
+    def fail_while_connecting(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            with manager._condition:  # pylint: disable=protected-access
+                manager._connecting = True  # pylint: disable=protected-access
+            raise RuntimeError("unexpected connection monitor failure")
+        return acquire(*args, **kwargs)
+
+    manager.acquire = fail_while_connecting  # type: ignore[method-assign]
+    manager.start()
+    try:
+        assert wait_until(lambda: manager.status()["status"] == "READY")
+        assert manager.status()["background_monitor_alive"] is True
+        with manager._condition:  # pylint: disable=protected-access
+            assert manager._connecting is False  # pylint: disable=protected-access
+    finally:
+        manager.stop()
+
+
+def test_background_monitor_exposes_inflight_and_completed_progress():
+    harness = Harness()
+    block_probe = threading.Event()
+    probe_entered = threading.Event()
+    block_enabled = False
+
+    def probe(project, knowledge_base):
+        harness.probe(project, knowledge_base)
+        if block_enabled:
+            probe_entered.set()
+            assert block_probe.wait(1.0)
+
+    manager = ConnectionManager(
+        harness.connect,
+        probe,
+        repository="disposable-test",
+        probe_interval_seconds=0.01,
+    )
+    manager.start()
+    try:
+        assert wait_until(
+            lambda: manager.status()["background_monitor_last_progress_at"]
+            is not None
+        )
+        block_enabled = True
+        assert probe_entered.wait(0.5)
+
+        status = manager.status()
+        assert status["background_monitor_alive"] is True
+        assert status["background_monitor_cycle_started_at"] is not None
+        assert status["background_monitor_last_progress_at"] is not None
+
+        block_probe.set()
+        assert wait_until(
+            lambda: manager.status()["background_monitor_cycle_started_at"]
+            is None
+        )
+        assert manager.status()["background_monitor_last_outcome"] == "READY"
+    finally:
+        block_probe.set()
+        manager.stop()
+
+
 def test_stale_non_null_proxy_never_reports_ready():
     harness = Harness()
     manager = manager_for(harness)

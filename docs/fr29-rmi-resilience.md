@@ -140,8 +140,9 @@ session is recognised and the configured project remains available. A non-null l
 proxy alone is never sufficient. Not-ready responses use HTTP 503.
 
 Health metadata contains state, mode, repository/project, generation, reconnect count,
-connected/probe/failure timestamps, sanitised error category, retry delay, and whether
-the background monitor thread is alive. It does not include server credentials, session
+connected/probe/failure timestamps, sanitised error category, retry delay, monitor
+liveness, current-cycle start, last-progress time, and last outcome. It does not include
+server credentials, session
 objects, exception text, or stack traces.
 The legacy `/health` remains HTTP 200 for compatibility but now reports honest
 `READY`/`NOT_READY` and sets `kb_loaded` from the real probe.

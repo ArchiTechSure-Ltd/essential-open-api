@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+import threading
+
+import essential_open_api
 from essential_open_api import create_app
 from essential_open_api.connection import (
     ConnectionManager,
@@ -91,6 +95,35 @@ def test_stale_proxy_transitions_readiness_to_not_ready():
 
     assert response.status_code == 503
     assert response.get_json()["state"] == "INVALID"
+
+
+def test_busy_probe_returns_truthful_not_ready_payload(monkeypatch):
+    manager, _project, _probes = make_manager()
+    manager.acquire()
+    entered = threading.Event()
+    release = threading.Event()
+    original_probe = manager._probe  # pylint: disable=protected-access
+
+    def blocking_probe(project, knowledge_base):
+        original_probe(project, knowledge_base)
+        entered.set()
+        assert release.wait(1.0)
+
+    manager._probe = blocking_probe  # pylint: disable=protected-access
+    monkeypatch.setattr(essential_open_api, "CONNECTION_WAIT_SECONDS", 0.01)
+    app = create_app(manager, start_connections=False)
+    client = app.test_client()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(manager.acquire, wait_timeout=1.0, force_probe=True)
+        assert entered.wait(0.5)
+        response = client.get("/health/ready")
+
+        assert response.status_code == 503
+        assert response.get_json()["state"] == "READY"
+        assert response.get_json()["status"] == "NOT_READY"
+        release.set()
+        pending.result(timeout=0.5)
 
 
 def test_legacy_health_does_not_claim_ready_for_stale_proxy():
