@@ -77,6 +77,25 @@ network loss, fresh generation, event-dependent object recreation, concurrent
 single-flight connection, bounded probe-lock waiting, prolonged capped backoff, honest
 readiness, safe read retry, and no write replay.
 
+The exact pushed commit `d5f2bd74b689499f23c7f12c7c1beb859d3f9b12` was also built on
+Tower and run as a labelled disposable container against Demo's read-only repository
+connection on 10 October 2026:
+
+- initial readiness was HTTP 200 at generation 1 with the background monitor alive;
+- after 35 seconds with no repository request, the first repository GET returned HTTP
+  200 (250 response bytes) without a reconnect or API restart;
+- disconnecting only the disposable container's Docker network caused the background
+  monitor to invalidate generation 1 within approximately eight seconds;
+- during the interruption, liveness remained HTTP 200 while readiness returned HTTP 503,
+  state `DEGRADED`, category `CONNECTION`, and a bounded retry delay;
+- after reconnecting that network, the same container returned to HTTP 200 readiness at
+  generation 2 with reconnect count 1; the first repository GET again returned HTTP 200;
+- network-restored-to-ready took approximately 65 seconds, consistent with the existing
+  bounded JRMP handshake/failure path rather than an unbounded retry loop;
+- Docker restart count remained zero and the container health was healthy; and
+- the disposable container, image, source directory, and root-only temporary environment
+  file were all removed after the test.
+
 A shared Protégé restart was deliberately not performed because it would disrupt
 Lambeth Live. Deployment, image replacement, Lambeth recovery, and Lambeth Lab/QA
 rollout remain separate approval-bound operational work.
